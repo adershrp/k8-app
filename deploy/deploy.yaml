@@ -1,0 +1,37 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  labels:
+    app: kube-app
+  name: kube-app
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: kube-app
+  strategy: {}
+  template:
+    metadata:
+      labels:
+        app: kube-app
+    spec:
+      serviceAccountName: kube-app-sa
+      restartPolicy: Always
+      containers:
+        - image: adershrp85/kube-app:latest
+          imagePullPolicy: Always
+          name: kube-app
+          env:
+            - name: CURRENT_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+          resources:
+            limits:
+              cpu: 100m
+              memory: 250Mi
+            requests:
+              memory: 250Mi
+              cpu: 100m
+
+status: {}
