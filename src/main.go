@@ -2,76 +2,103 @@ package main
 
 import (
 	"flag"
+	"os"
+	"os/signal"
 	"path/filepath"
+	"syscall"
+	"time"
 
-	"k8s.io/apimachinery/pkg/util/wait"
+	v1 "k8s.io/api/core/v1"
 	"k8s.io/client-go/informers"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
 	"k8s.io/client-go/util/homedir"
-	klog "k8s.io/klog/v2"
+	"k8s.io/klog/v2"
 	"k8s.io/utils/env"
 
-	//"k8s.io/client-go/pkg/api/v1"
-	controller "zts-upgrade-handler/controller"
-
-	v1 "k8s.io/api/core/v1"
+	"zts-upgrade-handler/config"
+	"zts-upgrade-handler/controller"
+	"zts-upgrade-handler/handlers"
 )
 
-var namespace string
+func main() {
+	c, err := loadConfig()
+	if err != nil {
+		return
+	}
+	kubeClient, err := getKubeClient()
+	if err != nil {
+		klog.Fatalf("Error: %s", err)
+	}
+	nsOption := informers.WithNamespace(c.NamespaceToWatch)
+	factory := informers.NewSharedInformerFactoryWithOptions(kubeClient, c.ResyncPeriod, nsOption)
+	// creating log handler --
+	logHandler := &handlers.LogHandler{}
+	if handlerErr := logHandler.Init(c, kubeClient); handlerErr != nil {
+		klog.Errorf("failed to initialize handler %v", handlerErr)
+		return
+	}
+	// delHandler := &handlers.DeleteHandler{}
 
-func init() {
-	namespace = env.GetString("CURRENT_NAMESPACE", v1.NamespaceDefault)
-	klog.Info("CURRENT_NAMESPACE ", namespace)
+	go func() {
+		err := controller.StartLogController(factory, logHandler, c)
+		if err != nil {
+			klog.Errorf("failed to start log controller %v", err)
+			return
+		}
+	}()
+
+	// go controller.StartLogController(factory, delHandler, c)
+	sigterm := make(chan os.Signal, 1)
+	signal.Notify(sigterm, syscall.SIGINT, syscall.SIGTERM)
+	<-sigterm
 }
 
-func main() {
-
-	var kubeconfig *string
+// getKubeClient
+func getKubeClient() (*kubernetes.Clientset, error) {
+	klog.Infof("building client")
+	var kubeConfig *string
 	if home := homedir.HomeDir(); home != "" {
-		kubeconfig = flag.String("kubeconfig", filepath.Join(home, ".kube", "config"), "(optional) absolute path to the kubeconfig file")
+		kubeConfig = flag.String("kubeConfig", filepath.Join(home, ".kube", "config"), "(optional) absolute path to the kubeConfig file")
 	} else {
-		kubeconfig = flag.String("kubeconfig", "", "absolute path to the kubeconfig file")
+		kubeConfig = flag.String("kubeConfig", "", "absolute path to the kubeConfig file")
 	}
 	flag.Parse()
 
 	var config *rest.Config
 	var err error
-	// use the current context in kubeconfig
-	config, err = clientcmd.BuildConfigFromFlags("", *kubeconfig)
+	// use the current context in kubeConfig
+	config, err = clientcmd.BuildConfigFromFlags("", *kubeConfig)
 	if config == nil {
 		klog.Error(err)
 		// creates the in-cluster config
 		config, err = rest.InClusterConfig()
 		if err != nil {
+			klog.Errorf("Error creating client with inclusterConfig, %s", err)
 			panic(err.Error())
 		}
+		klog.Info("kubeclient created using InClusterConfig")
 	}
-	// creates the clientset
-	clientset, err := kubernetes.NewForConfig(config)
-	if err != nil {
-		klog.Fatal(err)
+	if client, err := kubernetes.NewForConfig(config); err != nil {
+		klog.Errorf("Error creating client with inclusterConfig, %s", err)
+		return nil, err
+	} else {
+		return client, nil
 	}
-	// namespace
-	informerOption := informers.WithNamespace(namespace)
-	// labels := informers.WithTweakListOptions(func(lo *metav1.ListOptions) {
-	// 	lo.LabelSelector = "app=nats-box"
-	// })
-	// create shared factory
-	factory := informers.NewSharedInformerFactoryWithOptions(clientset, 0, informerOption)
-	_ = controller.NewPodLoggingController(factory)
-	// stop := make(chan struct{})
-	// defer close(stop)
-	// if err = podController.Run(stop); err != nil {
-	// 	klog.Fatal(err)
-	// }
-	_ = controller.NewJobDeleteController(factory)
-	// if err := jobController.Run(stop); err != nil {
-	// 	klog.Fatal(err)
-	// }
-	// select {}
-	factory.Start(wait.NeverStop)
-	factory.WaitForCacheSync(wait.NeverStop)
-	select {}
+}
+
+// loadConfig
+func loadConfig() (*config.Config, error) {
+	conf := &config.Config{
+		NamespaceToWatch: env.GetString("CURRENT_NAMESPACE", v1.NamespaceDefault),
+		ResyncPeriod:     0 * time.Minute,
+		WatchPods:        true,
+		WatchJobs:        true,
+		WatchServices:    true,
+		WatchSecrets:     true,
+		LabelsToWatch:    map[string]string{"app": "nginx"},
+		NamesToWatch:     []string{"nginx"},
+	}
+	return conf, nil
 }
